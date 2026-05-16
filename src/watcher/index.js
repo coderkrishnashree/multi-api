@@ -1,17 +1,14 @@
 const { collections } = require('../db');
 const config = require('../config');
+const logger = require('../logger');
 const bsc = require('./bsc');
 const tron = require('./tron');
 
-/**
- * One tick of the watcher:
- *  1. Find users who have pending payments or unconfirmed deposits.
- *  2. For each, poll Tron + BSC for new incoming transfers.
- *  3. Record new deposits (idempotent on tx_hash).
- *  4. Match deposits to pending payments.
- *  5. Bump confirmation counts; mark confirmed when threshold hit.
- *  6. Expire payments past their expiration timestamp.
- */
+let shouldStop = false;
+let currentBackoffMs = 0;
+
+function stop() { shouldStop = true; }
+
 async function tick() {
   await expirePastDuePayments();
 
@@ -27,25 +24,29 @@ async function tick() {
 
   if (activeUsers.length === 0) return;
 
-  // Fetch current block once per network
   const [bscCurrentBlock, tronCurrentBlock] = await Promise.all([
     bsc.getCurrentBlock().catch((e) => {
-      console.error('BSC getCurrentBlock failed:', e.message);
+      logger.error({ err: e.message }, 'BSC getCurrentBlock failed');
       return null;
     }),
     tron.getCurrentBlock().catch((e) => {
-      console.error('Tron getCurrentBlock failed:', e.message);
+      logger.error({ err: e.message }, 'Tron getCurrentBlock failed');
       return null;
     }),
   ]);
 
+  // If both RPCs are dead, treat the tick as a failure and back off
+  if (bscCurrentBlock === null && tronCurrentBlock === null) {
+    throw new Error('both RPCs failed');
+  }
+
   for (const user of activeUsers) {
+    if (shouldStop) return;
     await pollUser(user, { bscCurrentBlock, tronCurrentBlock }).catch((err) =>
-      console.error(`poll user ${user.user_id} failed:`, err.message)
+      logger.error({ user_id: user.user_id, err: err.message }, 'poll user failed')
     );
   }
 
-  // Confirmation pass: bump confirmations on existing pending_confirmation deposits
   if (bscCurrentBlock) await advanceConfirmations('bsc', bscCurrentBlock);
   if (tronCurrentBlock) await advanceConfirmations('tron', tronCurrentBlock);
 }
@@ -58,15 +59,9 @@ async function pollUser(user, blocks) {
 async function pollBsc(user, currentBlock) {
   const { transfers } = await bsc.fetchIncomingTransfers(user.bsc_address, user.bsc_last_block);
   for (const t of transfers) {
-    await recordDeposit({
-      network: 'bsc',
-      user,
-      transfer: t,
-      currentBlock,
-      decimalsConfirmations: config.bsc.confirmations,
-    });
+    await recordDeposit({ network: 'bsc', user, transfer: t, currentBlock,
+      requiredConfirmations: config.bsc.confirmations });
   }
-  // Advance last_block cursor
   await collections.users.updateOne(
     { user_id: user.user_id },
     { $set: { bsc_last_block: currentBlock, updated_at: new Date() } }
@@ -74,18 +69,10 @@ async function pollBsc(user, currentBlock) {
 }
 
 async function pollTron(user, currentBlock) {
-  const { transfers } = await tron.fetchIncomingTransfers(
-    user.tron_address,
-    user.tron_last_block
-  );
+  const { transfers } = await tron.fetchIncomingTransfers(user.tron_address, user.tron_last_block);
   for (const t of transfers) {
-    await recordDeposit({
-      network: 'tron',
-      user,
-      transfer: t,
-      currentBlock,
-      decimalsConfirmations: config.tron.confirmations,
-    });
+    await recordDeposit({ network: 'tron', user, transfer: t, currentBlock,
+      requiredConfirmations: config.tron.confirmations });
   }
   await collections.users.updateOne(
     { user_id: user.user_id },
@@ -93,14 +80,14 @@ async function pollTron(user, currentBlock) {
   );
 }
 
-async function recordDeposit({ network, user, transfer, currentBlock, decimalsConfirmations }) {
+async function recordDeposit({ network, user, transfer, currentBlock, requiredConfirmations }) {
   const confirmations = transfer.block_number
     ? Math.max(0, currentBlock - transfer.block_number)
     : 0;
-  const status = confirmations >= decimalsConfirmations ? 'confirmed' : 'pending_confirmation';
+  const status = confirmations >= requiredConfirmations ? 'confirmed' : 'pending_confirmation';
 
   try {
-    const result = await collections.deposits.insertOne({
+    await collections.deposits.insertOne({
       network,
       tx_hash: transfer.tx_hash,
       user_id: user.user_id,
@@ -114,10 +101,15 @@ async function recordDeposit({ network, user, transfer, currentBlock, decimalsCo
       seen_at: new Date(),
       confirmed_at: status === 'confirmed' ? new Date() : null,
     });
-    console.log(`💸 deposit seen [${network}] ${transfer.amount} USDT → ${user.user_id} (tx ${transfer.tx_hash.slice(0, 10)}…)`);
+    logger.info({
+      network, amount: transfer.amount, user_id: user.user_id,
+      tx: transfer.tx_hash.slice(0, 10),
+    }, 'deposit seen');
 
-    // Try to match a pending payment
-    await tryMatchDeposit({ network, user, tx_hash: transfer.tx_hash, amount: transfer.amount, status, confirmations });
+    await tryMatchDeposit({
+      network, user, tx_hash: transfer.tx_hash,
+      amount: transfer.amount, status, confirmations,
+    });
 
     if (status === 'pending_confirmation') {
       await collections.users.updateOne(
@@ -126,16 +118,11 @@ async function recordDeposit({ network, user, transfer, currentBlock, decimalsCo
       );
     }
   } catch (err) {
-    // Duplicate key = we've seen this tx already; ignore
-    if (err.code === 11000) return;
+    if (err.code === 11000) return; // dup tx — already recorded
     throw err;
   }
 }
 
-/**
- * Match an incoming deposit to a pending payment for the same user, network, and amount.
- * Strategy: oldest pending payment with matching amount wins.
- */
 async function tryMatchDeposit({ network, user, tx_hash, amount, status, confirmations }) {
   const payment = await collections.payments.findOneAndUpdate(
     {
@@ -146,38 +133,28 @@ async function tryMatchDeposit({ network, user, tx_hash, amount, status, confirm
       matched_tx_hash: null,
     },
     {
-      $set: {
-        matched_tx_hash: tx_hash,
-        confirmations,
-        updated_at: new Date(),
-      },
+      $set: { matched_tx_hash: tx_hash, confirmations, updated_at: new Date() },
     },
     { sort: { created_at: 1 }, returnDocument: 'after' }
   );
 
   const matched = payment.value || payment;
-  if (!matched) return;
+  if (!matched || !matched.payment_id) return;
 
   await collections.deposits.updateOne(
     { network, tx_hash },
     { $set: { matched_payment_id: matched.payment_id } }
   );
 
-  // If already confirmed at intake, terminalize immediately
   if (status === 'confirmed') {
     await terminalize(matched.payment_id, 'confirmed');
   } else {
-    console.log(`🔗 matched payment ${matched.payment_id} ← deposit ${tx_hash.slice(0, 10)}…`);
+    logger.info({ payment_id: matched.payment_id, tx: tx_hash.slice(0, 10) }, 'matched deposit');
   }
 }
 
-/**
- * Walk through pending_confirmation deposits and bump their confirmation counts.
- * When a deposit reaches the threshold, mark its matched payment confirmed.
- */
 async function advanceConfirmations(network, currentBlock) {
   const threshold = network === 'bsc' ? config.bsc.confirmations : config.tron.confirmations;
-
   const deposits = await collections.deposits
     .find({ network, status: 'pending_confirmation' })
     .toArray();
@@ -188,23 +165,18 @@ async function advanceConfirmations(network, currentBlock) {
     if (confs >= threshold) {
       await collections.deposits.updateOne(
         { network, tx_hash: d.tx_hash },
-        {
-          $set: { status: 'confirmed', confirmations: confs, confirmed_at: new Date() },
-        }
+        { $set: { status: 'confirmed', confirmations: confs, confirmed_at: new Date() } }
       );
       await collections.users.updateOne(
         { user_id: d.user_id },
         { $inc: { unconfirmed_deposit_count: -1 } }
       );
-      if (d.matched_payment_id) {
-        await terminalize(d.matched_payment_id, 'confirmed');
-      }
+      if (d.matched_payment_id) await terminalize(d.matched_payment_id, 'confirmed');
     } else {
       await collections.deposits.updateOne(
         { network, tx_hash: d.tx_hash },
         { $set: { confirmations: confs } }
       );
-      // Keep the matched payment's confirmation count in sync
       if (d.matched_payment_id) {
         await collections.payments.updateOne(
           { payment_id: d.matched_payment_id },
@@ -216,51 +188,54 @@ async function advanceConfirmations(network, currentBlock) {
 }
 
 async function terminalize(paymentId, event) {
-  const updated = await collections.payments.findOneAndUpdate(
+  const result = await collections.payments.findOneAndUpdate(
     { payment_id: paymentId, status: 'pending' },
     {
       $set: {
         status: 'terminal',
         terminal_event: event,
-        next_webhook_at: Date.now(), // queue webhook immediately
+        next_webhook_at: Date.now(),
         updated_at: new Date(),
       },
     },
     { returnDocument: 'after' }
   );
-  const p = updated.value || updated;
-  if (!p) return;
+  const p = result.value || result;
+  if (!p || !p.payment_id) return;
 
   await collections.users.updateOne(
     { user_id: p.user_id },
     { $inc: { pending_payment_count: -1 } }
   );
-
-  console.log(`📦 payment ${paymentId} → ${event}`);
+  logger.info({ payment_id: paymentId, event }, 'payment terminalized');
 }
 
 async function expirePastDuePayments() {
   const expired = await collections.payments
     .find({ status: 'pending', expires_at: { $lt: Date.now() }, matched_tx_hash: null })
     .toArray();
-
-  for (const p of expired) {
-    await terminalize(p.payment_id, 'expired');
-  }
+  for (const p of expired) await terminalize(p.payment_id, 'expired');
 }
 
-/**
- * Run the watcher loop forever. Stagger from the webhook loop with a small offset.
- */
 async function start() {
-  while (true) {
+  logger.info({ intervalMs: config.watcher.intervalMs }, 'watcher started');
+  while (!shouldStop) {
     try {
       await tick();
+      currentBackoffMs = 0; // reset on success
     } catch (err) {
-      console.error('watcher tick error:', err.message);
+      currentBackoffMs = Math.min(
+        currentBackoffMs ? currentBackoffMs * 2 : config.watcher.intervalMs,
+        config.watcher.maxBackoffMs
+      );
+      logger.error({ err: err.message, backoffMs: currentBackoffMs }, 'watcher tick error');
     }
-    await new Promise((r) => setTimeout(r, config.watcher.intervalMs));
+    const sleep = currentBackoffMs || config.watcher.intervalMs;
+    // Add ±10% jitter so multiple instances don't sync up against the RPC
+    const jittered = sleep * (0.9 + Math.random() * 0.2);
+    await new Promise((r) => setTimeout(r, jittered));
   }
+  logger.info('watcher stopped');
 }
 
-module.exports = { start, tick };
+module.exports = { start, stop, tick };

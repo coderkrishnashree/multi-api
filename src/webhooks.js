@@ -65,7 +65,7 @@ async function deliverWebhook(payment) {
         },
       }
     );
-    console.log(`✅ webhook delivered: ${r.payment_id} (${payload.event})`);
+    logger.info(`✅ webhook delivered: ${r.payment_id} (${payload.event})`);
   } catch (err) {
     const attempts = (r.delivery_attempts || 0) + 1;
     if (attempts >= config.webhooks.maxAttempts) {
@@ -81,7 +81,7 @@ async function deliverWebhook(payment) {
           },
         }
       );
-      console.error(`💀 webhook permanently failed: ${r.payment_id} after ${attempts}`);
+      logger.error(`💀 webhook permanently failed: ${r.payment_id} after ${attempts}`);
     } else {
       const backoff = 30000 * Math.pow(2, attempts - 1);
       await collections.payments.updateOne(
@@ -96,7 +96,7 @@ async function deliverWebhook(payment) {
           },
         }
       );
-      console.warn(`⚠️  webhook ${r.payment_id} attempt ${attempts} failed; retry in ${Math.round(backoff / 1000)}s`);
+      logger.warn(`⚠️  webhook ${r.payment_id} attempt ${attempts} failed; retry in ${Math.round(backoff / 1000)}s`);
     }
   }
 }
@@ -113,7 +113,7 @@ async function tickWebhooks() {
 
   for (const p of due) {
     await deliverWebhook(p).catch((err) =>
-      console.error(`webhook tick failed for ${p.payment_id}:`, err.message)
+      logger.error(`webhook tick failed for ${p.payment_id}:`, err.message)
     );
   }
 }

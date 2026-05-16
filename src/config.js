@@ -12,6 +12,18 @@ function required(name) {
 const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
+  logLevel: process.env.LOG_LEVEL || 'info',
+
+  // Render sits behind one proxy hop. Set 2 if you add Cloudflare in front.
+  trustProxyHops: parseInt(process.env.TRUST_PROXY_HOPS || '1', 10),
+
+  // Comma-separated list of allowed CORS origins. Empty = no CORS headers.
+  corsOrigins: (process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean),
+
+  gracefulShutdownTimeoutMs: parseInt(process.env.GRACEFUL_SHUTDOWN_TIMEOUT_MS || '15000', 10),
 
   db: {
     url: required('DB_URL'),
@@ -42,6 +54,7 @@ const config = {
 
   watcher: {
     intervalMs: parseInt(process.env.WATCHER_INTERVAL_MS || '5000', 10),
+    maxBackoffMs: parseInt(process.env.WATCHER_MAX_BACKOFF_MS || '60000', 10),
   },
 
   payments: {
@@ -56,6 +69,11 @@ const config = {
 
 if (config.apiKeys.length === 0) {
   console.warn('⚠️  No API_KEYS configured. Set at least one before deploying.');
+}
+
+if (!config.webhookSecret && config.nodeEnv === 'production') {
+  console.error('❌ WEBHOOK_SECRET required in production');
+  process.exit(1);
 }
 
 module.exports = config;

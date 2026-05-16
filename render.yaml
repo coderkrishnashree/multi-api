@@ -1,0 +1,77 @@
+services:
+  - type: web
+    name: multipay-api
+    runtime: node
+    region: oregon
+    plan: starter
+    branch: main
+    buildCommand: npm ci
+    startCommand: node src/index.js
+    healthCheckPath: /health/live
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: PORT
+        value: 3000
+      - key: TRUST_PROXY_HOPS
+        value: 1
+      - key: DB_URL
+        sync: false
+      - key: DB_NAME
+        value: multipay_wrapper
+      - key: API_KEYS
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
+      - key: MASTER_MNEMONIC
+        sync: false
+      - key: BSC_RPC_URL
+        sync: false
+      - key: TRON_HTTP_URL
+        sync: false
+      - key: BSC_CONFIRMATIONS
+        value: 15
+      - key: TRON_CONFIRMATIONS
+        value: 19
+      - key: WATCHER_INTERVAL_MS
+        value: 5000
+
+  - type: cron
+    name: multipay-sweep
+    runtime: node
+    region: oregon
+    plan: starter
+    branch: main
+    schedule: "0 * * * *"
+    buildCommand: npm ci
+    startCommand: node sweep.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_URL
+        sync: false
+      - key: DB_NAME
+        value: multipay_wrapper
+      - key: MASTER_MNEMONIC
+        sync: false
+      - key: BSC_RPC_URL
+        sync: false
+      - key: TRON_HTTP_URL
+        sync: false
+      - key: BSC_MAIN_WALLET
+        sync: false
+      - key: TRON_MAIN_WALLET
+        sync: false
+      - key: BSC_GAS_WALLET_PK
+        sync: false
+      - key: TRON_GAS_WALLET_PK
+        sync: false
+      - key: MIN_SWEEP_USDT
+        value: 2
+      - key: BNB_GAS_TOPUP
+        value: 0.0008
+      - key: TRX_GAS_TOPUP
+        value: 15

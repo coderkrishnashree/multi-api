@@ -1,6 +1,6 @@
 {
   "name": "multipay-api",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Self-hosted USDT payment gateway (TRC-20 + BEP-20) with per-user HD addresses",
   "main": "src/index.js",
   "scripts": {
@@ -8,21 +8,27 @@
     "dev": "nodemon src/index.js",
     "sweep": "node sweep.js",
     "sweep:dry": "node sweep.js --dry-run",
-    "generate-mnemonic": "node scripts/generate-mnemonic.js"
+    "generate-mnemonic": "node scripts/generate-mnemonic.js",
+    "logs:pretty": "node src/index.js | pino-pretty"
   },
   "dependencies": {
     "axios": "^1.7.0",
     "bip39": "^3.1.0",
+    "compression": "^1.7.5",
     "dotenv": "^16.4.0",
     "ethers": "^6.13.0",
     "express": "^4.21.0",
     "express-rate-limit": "^7.4.0",
+    "helmet": "^8.0.0",
     "mongodb": "^6.10.0",
+    "pino": "^9.5.0",
+    "pino-http": "^10.3.0",
     "tronweb": "^5.3.2",
     "uuid": "^10.0.0"
   },
   "devDependencies": {
-    "nodemon": "^3.1.0"
+    "nodemon": "^3.1.0",
+    "pino-pretty": "^11.3.0"
   },
   "engines": {
     "node": ">=18"

@@ -1,4 +1,4 @@
-# Environment / secrets
+# Secrets
 .env
 .env.local
 .env.*.local
@@ -11,15 +11,19 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# OS
+# OS / editor
 .DS_Store
 Thumbs.db
-
-# Editor
 .vscode/
 .idea/
 *.swp
 
-# Logs
+# Logs / runtime
 logs/
 *.log
+coverage/
+.nyc_output/
+
+# Build artifacts (none yet, but future-proof)
+dist/
+build/
