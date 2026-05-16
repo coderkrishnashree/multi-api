@@ -9,7 +9,8 @@
     "sweep": "node sweep.js",
     "sweep:dry": "node sweep.js --dry-run",
     "generate-mnemonic": "node scripts/generate-mnemonic.js",
-    "logs:pretty": "node src/index.js | pino-pretty"
+    "logs:pretty": "node src/index.js | pino-pretty",
+    "scan": "node scripts/scan.js"
   },
   "dependencies": {
     "axios": "^1.7.0",
