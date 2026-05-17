@@ -1,15 +1,15 @@
-# multipay-api — Integration Guide
+# USDT Payment Gateway — Integration Guide
 
-A self-hosted USDT payment gateway supporting **TRC-20 (Tron)** and **BEP-20 (BSC)** with **per-user wallet addresses**. Each end user gets a single deposit address per network that they can reuse across any number of payments — no need to surface a new address per order.
+A self-hosted USDT payment gateway supporting **TRC-20 (Tron)** and **BEP-20 (BSC)** with **per-user wallet addresses**. Each end user gets a single deposit address per network that they can reuse across any number of payments — no need to generate a new address per order.
 
 ---
 
-## How it works (the model in 30 seconds)
+## How it works (the 30-second model)
 
 1. You create a **user** in our system once. We return two deposit addresses (one Tron, one BSC).
-2. When that user owes you money, you create a **payment** with the user_id, network, and amount.
-3. The user sends USDT to their saved address.
-4. We watch the chain. When the **exact amount** lands and reaches confirmation threshold (15 blocks BSC / 19 blocks Tron), we fire a signed webhook to you.
+2. When that user owes you money, you create a **payment** with `user_id`, `network`, and `amount`.
+3. The user sends USDT to their saved address on the chosen network.
+4. We watch the chain. When the **exact amount** lands and reaches the confirmation threshold (15 blocks BSC / 19 blocks Tron), we fire a signed webhook to you.
 5. You fulfill the order.
 
 The same user keeps the same address forever. They can save it in their wallet's address book and use it for every payment.
@@ -19,7 +19,7 @@ The same user keeps the same address forever. They can save it in their wallet's
 ## Base URL
 
 ```
-https://your-deployment.onrender.com
+https://your-deployment.example.com
 ```
 
 All endpoints below are relative to this base.
@@ -34,7 +34,7 @@ Every `/v1/*` request must include your API key in a header:
 X-API-Key: your_api_key_here
 ```
 
-Missing or invalid keys return `401 Unauthorized`. The `/health*` endpoints don't require a key.
+Missing or invalid keys return `401 Unauthorized`. The `/health/live` and `/health/ready` endpoints don't require a key.
 
 Keep your API key secret — anyone with it can create payments and read user data on your account. If it leaks, contact us to rotate it.
 
@@ -43,7 +43,7 @@ Keep your API key secret — anyone with it can create payments and read user da
 ## Rate limits
 
 - **120 requests per minute** per IP.
-- Exceeding it returns `429 Too Many Requests` with standard `RateLimit-*` response headers.
+- Exceeding the limit returns `429 Too Many Requests` with standard `RateLimit-*` response headers.
 
 ---
 
@@ -77,10 +77,10 @@ Common HTTP status codes:
 
 | Status | Meaning | Safe to fulfill? |
 |---|---|---|
-| `pending` | Awaiting payment from the user. | No |
-| `received` | Funds arrived on-chain but not enough confirmations yet. | **No** — could still drop in a re-org |
-| `confirmed` ✅ | Fully settled. | **Yes** |
-| `expired` | Payment window passed without sufficient funds. | Cancel the order |
+| `pending` | Awaiting payment from the user | No |
+| `received` | Funds arrived on-chain but not yet at confirmation threshold | **No** — could still drop in a re-org |
+| `confirmed` ✅ | Fully settled | **Yes** |
+| `expired` | Payment window passed without sufficient funds | Cancel the order |
 
 Always wait for `confirmed` before delivering goods or services.
 
@@ -123,7 +123,7 @@ Detailed counters for monitoring. Requires API key.
   "payments": { "pending": 5, "terminal": 9201 },
   "webhooks_queued": 0,
   "deposits": 9180,
-  "time": "2026-05-16T10:00:00.000Z"
+  "time": "2026-05-17T10:00:00.000Z"
 }
 ```
 
@@ -152,7 +152,7 @@ Content-Type: application/json
   "user_id": "customer_42",
   "tron_address": "TXyzABC123...",
   "bsc_address": "0xAbC123...",
-  "created_at": "2026-05-16T10:00:00.000Z"
+  "created_at": "2026-05-17T10:00:00.000Z"
 }
 ```
 
@@ -182,7 +182,7 @@ Fetch a user's addresses.
   "user_id": "customer_42",
   "tron_address": "TXyzABC123...",
   "bsc_address": "0xAbC123...",
-  "created_at": "2026-05-16T10:00:00.000Z"
+  "created_at": "2026-05-17T10:00:00.000Z"
 }
 ```
 
@@ -222,11 +222,11 @@ Content-Type: application/json
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `user_id` | string | yes | User must already exist (`POST /v1/users` first) |
+| `user_id` | string | yes | User must already exist (call `POST /v1/users` first) |
 | `network` | string | yes | `"tron"` or `"bsc"` |
-| `amount` | string | yes | Positive number as string (avoids float precision issues). Normalized to up to 6 decimals; trailing zeros stripped |
+| `amount` | string | yes | Positive number as a string. Normalized to up to 6 decimals; trailing zeros stripped. See "Amount handling" below |
 | `order_id` | string | yes | Your internal order reference. Stored alongside the payment |
-| `webhook_url` | string | no | https URL we'll POST to on terminal status |
+| `webhook_url` | string | no | http(s) URL we'll POST to on terminal status. Omit to skip webhooks (poll instead) |
 | `expires_in_minutes` | integer | no | Default 30. After expiry the payment terminalizes as `expired` |
 
 **Response 201:**
@@ -240,7 +240,7 @@ Content-Type: application/json
   "amount": "25",
   "address": "TXyzABC123...",
   "status": "pending",
-  "expires_at": "2026-05-16T10:30:00.000Z"
+  "expires_at": "2026-05-17T10:30:00.000Z"
 }
 ```
 
@@ -254,11 +254,30 @@ Content-Type: application/json
 | 400 | `invalid_order_id` | Missing |
 | 400 | `invalid_webhook_url` | Not http(s) |
 | 404 | `user_not_found` | Create the user first |
-| 409 | `duplicate_pending_amount` | This user already has a pending payment for this exact amount on this network. Response includes `existing_payment_id` so you can reuse or cancel |
+| 409 | `duplicate_pending_amount` | This user already has a pending payment for this exact amount on this network. Response includes `existing_payment_id` |
 
-**Important — amount normalization.** We normalize amounts to up to 6 decimal places and strip trailing zeros for matching. `"25.00"`, `"25"`, and `"25.000000"` are all stored as `"25"`. The user must send exactly that amount — `"25.01"` will not match a `"25"` payment. Show the normalized `amount` from the response to your user, not the value you sent in the request.
+#### ⚠️ Amount handling (read this carefully)
 
-**Important — network identification.** The `network` field determines which chain the user must send on. Sending USDT-BEP20 to a Tron address (or vice versa) loses the funds permanently. Always show the user the `network_label` clearly alongside the address — for example: *"Send USDT on the **TRC20 (Tron)** network to this address"*.
+We normalize submitted amounts to up to 6 decimal places and strip trailing zeros:
+
+| You submit | We store and display as |
+|---|---|
+| `"25"` | `"25"` |
+| `"25.00"` | `"25"` |
+| `"25.000000"` | `"25"` |
+| `"25.50"` | `"25.5"` |
+| `"25.123456"` | `"25.123456"` |
+| `"25.1234567"` | `"25.123456"` (truncated) |
+
+**The user must send *exactly* the normalized amount.** A transfer of `"25.01"` will not match a `"25"` payment — that deposit will sit on the address until manually reconciled.
+
+**Always show the user the `amount` from our response, not the value you sent in the request.** This avoids displaying a different precision than what we'll be matching against.
+
+#### ⚠️ Network identification
+
+The `network` field determines which chain the user must send on. Sending USDT-BEP20 to a Tron address (or vice versa) **loses the funds permanently** — there's no recovery. Always show the user the `network_label` clearly alongside the address, e.g.:
+
+> *"Send USDT on the **TRC20 (Tron)** network to this address."*
 
 **curl example:**
 ```bash
@@ -293,8 +312,8 @@ Look up the current state of a payment.
   "status": "confirmed",
   "confirmations": 19,
   "tx_hash": "0xabc...",
-  "expires_at": "2026-05-16T10:30:00.000Z",
-  "created_at": "2026-05-16T10:00:00.000Z"
+  "expires_at": "2026-05-17T10:30:00.000Z",
+  "created_at": "2026-05-17T10:00:00.000Z"
 }
 ```
 
@@ -317,15 +336,15 @@ List recent payments. Useful for admin dashboards and reconciliation.
 | Param | Type | Notes |
 |---|---|---|
 | `user_id` | string | Filter to one user |
-| `status` | string | One of `pending`, `terminal` |
+| `status` | string | One of `pending`, `received`, `confirmed`, `expired` |
 | `limit` | integer | Default 50, max 200 |
 
 **Response 200:**
 ```json
 {
   "payments": [
-    { "payment_id": "...", "status": "confirmed", "..." },
-    { "payment_id": "...", "status": "pending", "..." }
+    { "payment_id": "...", "status": "confirmed", "...": "..." },
+    { "payment_id": "...", "status": "pending",   "...": "..." }
   ]
 }
 ```
@@ -355,7 +374,7 @@ The webhook fires within ~5 seconds.
 
 | Status | `error` | Cause |
 |---|---|---|
-| 404 | `not_found` | Unknown payment_id |
+| 404 | `not_found` | Unknown `payment_id` |
 | 409 | `not_terminal` | Payment is still `pending` |
 | 400 | `no_webhook` | Payment was created without a `webhook_url` |
 
@@ -370,7 +389,7 @@ When a payment reaches a **terminal state** (`confirmed` or `expired`) and was c
 - **At-least-once delivery.** Your endpoint must be idempotent on `payment_id`.
 - **6 attempts** with exponential backoff: 30s, 1m, 2m, 4m, 8m, 16m.
 - A delivery is considered successful when your endpoint returns **2xx within 10 seconds**.
-- Any non-2xx or timeout triggers a retry until attempts exhaust, then the webhook is marked failed (use the replay endpoint to recover).
+- Any non-2xx response or timeout triggers a retry until attempts exhaust, then the webhook is marked failed — use the replay endpoint to recover.
 
 ## Payload
 
@@ -384,9 +403,7 @@ When a payment reaches a **terminal state** (`confirmed` or `expired`) and was c
   "amount": "25",
   "address": "TXyzABC123...",
   "tx_hash": "0xabc...",
-  "status": "confirmed",
-  "confirmations": 19,
-  "timestamp": "2026-05-16T10:15:00.000Z"
+  "timestamp": "2026-05-17T10:15:00.000Z"
 }
 ```
 
@@ -395,15 +412,22 @@ When a payment reaches a **terminal state** (`confirmed` or `expired`) and was c
 | `event` | When |
 |---|---|
 | `payment.confirmed` | Funds received and confirmed on-chain |
-| `payment.expired` | Window passed without matching deposit |
+| `payment.expired` | Window passed without a matching deposit |
+
+For `payment.expired`, `tx_hash` will be `null`.
 
 ## Signature verification (required)
 
-Every webhook includes an `X-Signature` header — the HMAC-SHA256 of the **raw request body** using your `WEBHOOK_SECRET`, hex-encoded. **You must verify it before trusting the payload.**
+Every webhook includes an `X-Signature` header — the HMAC-SHA256 of the **raw request body** using your `WEBHOOK_SECRET`, hex-encoded.
 
-Without verification, anyone who guesses your endpoint URL could forge a "confirmed" webhook and steal goods.
+**You must verify it before trusting the payload.** Without verification, anyone who guesses your endpoint URL could forge a `confirmed` webhook and steal goods.
 
-### Verifying in Node.js
+### Two critical points for any language
+
+1. Sign the **raw request body bytes**, not a re-serialized JSON object. Re-serializing changes whitespace and key order, which breaks the signature.
+2. Use a **timing-safe** comparison (`crypto.timingSafeEqual`, `hmac.compare_digest`, `hash_equals`, `hmac.Equal`). Don't use `==`.
+
+### Node.js
 
 ```javascript
 const crypto = require('crypto');
@@ -412,7 +436,7 @@ app.post('/webhooks/usdt', express.raw({ type: 'application/json' }), (req, res)
   const signature = req.header('X-Signature');
   const expected = crypto
     .createHmac('sha256', process.env.WEBHOOK_SECRET)
-    .update(req.body)            // raw Buffer, NOT the parsed object
+    .update(req.body)              // raw Buffer, NOT the parsed object
     .digest('hex');
 
   if (!signature || !crypto.timingSafeEqual(
@@ -429,7 +453,7 @@ app.post('/webhooks/usdt', express.raw({ type: 'application/json' }), (req, res)
 });
 ```
 
-### Verifying in Python
+### Python
 
 ```python
 import hmac
@@ -444,7 +468,7 @@ def handle_webhook():
     signature = request.headers.get("X-Signature", "")
     expected = hmac.new(
         WEBHOOK_SECRET,
-        request.data,           # raw bytes, NOT request.json
+        request.data,                # raw bytes, NOT request.json
         hashlib.sha256
     ).hexdigest()
 
@@ -456,14 +480,14 @@ def handle_webhook():
     return "", 200
 ```
 
-### Verifying in PHP
+### PHP
 
 ```php
 <?php
-$secret = getenv('WEBHOOK_SECRET');
-$body = file_get_contents('php://input');           // raw, before json_decode
+$secret    = getenv('WEBHOOK_SECRET');
+$body      = file_get_contents('php://input');     // raw, before json_decode
 $signature = $_SERVER['HTTP_X_SIGNATURE'] ?? '';
-$expected = hash_hmac('sha256', $body, $secret);
+$expected  = hash_hmac('sha256', $body, $secret);
 
 if (!hash_equals($expected, $signature)) {
     http_response_code(401);
@@ -475,7 +499,7 @@ $payload = json_decode($body, true);
 http_response_code(200);
 ```
 
-### Verifying in Go
+### Go
 
 ```go
 package main
@@ -511,11 +535,6 @@ func handleWebhook(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-**Two critical points for any language:**
-
-1. Sign the **raw request body bytes**, not a re-serialized JSON object. Re-serializing changes whitespace and key order, which breaks the signature.
-2. Use a **timing-safe** comparison (`hmac.compare_digest`, `crypto.timingSafeEqual`, `hash_equals`, `hmac.Equal`). Don't use `==`.
-
 ---
 
 # Integration flow — end to end
@@ -524,26 +543,27 @@ Here's the complete flow for an e-commerce checkout:
 
 ### One-time setup
 
-1. We give you an API key and webhook secret. Store both as environment variables.
-2. Decide which networks you'll offer (most apps offer both BEP-20 and TRC-20).
+1. We give you an API key and webhook secret. Store both as environment variables in your application.
+2. Decide which networks you'll offer (most apps offer both BEP-20 and TRC-20 and let the customer choose).
 
 ### Per user — first time only
 
 When a user first registers (or first reaches checkout):
 
-```bash
-POST /v1/users { "user_id": "your_user_id" }
+```http
+POST /v1/users
+{ "user_id": "your_user_id" }
 ```
 
-Store the returned `tron_address` and `bsc_address` against that user in your DB. **You don't need to call this again for the same user** — but it's safe (idempotent) if you do.
+Store the returned `tron_address` and `bsc_address` against that user in your DB. You don't need to call this again for the same user — but it's safe (idempotent) if you do.
 
 ### Per payment
 
 When the user clicks "pay with crypto":
 
-1. **Ask them which network they want to pay on** (TRC-20 or BEP-20).
+1. **Ask which network they want to pay on** (TRC-20 or BEP-20).
 2. **Create the payment:**
-   ```json
+   ```http
    POST /v1/payments
    {
      "user_id": "your_user_id",
@@ -554,15 +574,15 @@ When the user clicks "pay with crypto":
    }
    ```
 3. **Show the user:**
-   - The exact amount (use the `amount` field from the response, after normalization)
-   - The network — clearly label it `TRC20 (Tron)` or `BEP20 (BSC)`
-   - The deposit address (and a QR code of it)
+   - The exact `amount` from the response (post-normalization)
+   - The `network_label` (e.g. "TRC20 (Tron)") clearly displayed
+   - The deposit `address`, plus a QR code of it
    - A countdown to `expires_at`
 4. **Wait for the webhook.** When `event: "payment.confirmed"` arrives:
    - Verify the signature
    - Check idempotency on `payment_id`
    - Mark the order paid; fulfill
-5. **Backup polling.** If you haven't received a webhook within ~10 minutes, hit `GET /v1/payments/:id` to check status. Stop polling once you see `confirmed` or `expired`.
+5. **Backup polling.** If you haven't received a webhook within ~10 minutes of a payment becoming due, hit `GET /v1/payments/:id` to check status. Stop polling once you see `confirmed` or `expired`.
 
 ### Idempotency on your side
 
@@ -573,28 +593,31 @@ Save webhook deliveries by `payment_id`. If you receive the same `payment_id` tw
 # Common questions
 
 **Can a user have multiple pending payments at once?**
-Yes — but not two pending payments for the *same network and same exact amount*. If you try, you get `409 duplicate_pending_amount` and the response tells you which existing payment you're conflicting with. This is the matching logic: a deposit of $25 to user X's TRX address can only mean one specific $25 pending payment.
+Yes — but not two pending payments for the *same network and same exact amount*. If you try, you get `409 duplicate_pending_amount` and the response tells you which existing payment you're conflicting with. This is the matching logic: a deposit of $25 to user X's Tron address can only mean one specific $25 pending payment.
 
 **What if the user sends the wrong amount?**
-We only match an exact amount. If they send less, the payment stays pending and expires. If they send more, same thing. Funds aren't lost — they sit on the user's deposit address and the next sweep moves them to the merchant's main wallet, but the *payment* won't auto-confirm. Handle these cases manually.
+We only match on exact amount. If they send less, the payment stays `pending` and eventually expires. If they send more, same outcome. Funds aren't lost — they sit on the user's deposit address and the next sweep moves them to the merchant's main wallet, but the *payment* won't auto-confirm. Reconcile manually.
 
 **What if the user sends after the payment expires?**
-The payment is marked `expired` and the webhook fires with `event: "payment.expired"`. Funds still arrive on the address and are swept normally, but no specific payment is matched. Reconcile out-of-band — or restart the order flow and create a new payment for the same amount, which will then match the deposit retroactively if you do it before the user has paid again.
+The payment is marked `expired` and the webhook fires with `event: "payment.expired"`. Funds still arrive on the address and are swept normally, but no specific payment is matched. Reconcile out-of-band — or recreate the order with a new payment for the same amount, which will then match retroactively if the deposit hasn't been swept yet.
 
 **Can I cancel a payment?**
-There's no explicit cancel endpoint, but you can just stop showing the user the address. The payment expires after the window. Lower `expires_in_minutes` on creation if you need a faster turnover.
+There's no explicit cancel endpoint. Stop showing the user the address; the payment expires after the window. Lower `expires_in_minutes` on creation if you need faster turnover.
 
 **How long do confirmations take?**
 - BSC: ~15 blocks × 3s = **~45 seconds**
 - Tron: ~19 blocks × 3s = **~1 minute**
 
-So typically a payment goes from `received` to `confirmed` within a minute of arriving.
+So a payment typically goes from `received` to `confirmed` within a minute of arriving.
 
 **Can I get a real-time `received` event?**
-Currently webhooks fire only on terminal state (`confirmed` / `expired`). If you need a `received` ping, poll `GET /v1/payments/:id` — the `status` will flip to `received` as soon as we see the on-chain deposit, before confirmations land.
+Webhooks fire only on terminal state (`confirmed` / `expired`). If you need a `received` ping, poll `GET /v1/payments/:id` — `status` flips to `received` as soon as we see the on-chain deposit, before confirmations land.
 
 **What's the testnet?**
-Not supported in this gateway — only mainnet BSC and Tron. For end-to-end testing, do a $1 real-money smoke test.
+Not supported in this gateway — only mainnet BSC and Tron. For end-to-end testing, do a small real-money smoke test (e.g. $1 USDT on each network).
+
+**What if I lose my API key or webhook secret?**
+Contact us. We can rotate both. The webhook secret rotation requires a brief coordination window so you don't miss in-flight deliveries during the cutover.
 
 ---
 
@@ -612,8 +635,8 @@ Not supported in this gateway — only mainnet BSC and Tron. For end-to-end test
 | GET | `/v1/payments` | List payments | API key |
 | POST | `/v1/payments/:id/replay-webhook` | Re-queue webhook | API key |
 
-**Headers on every `/v1/*` request:** `X-API-Key: ...`
-**Headers on every webhook delivery:** `X-Signature: <hex hmac-sha256 of body>`
+**Headers on every `/v1/*` request:** `X-API-Key: <your key>`
+**Headers on every webhook delivery:** `X-Signature: <hex HMAC-SHA256 of body>`
 
 ---
 

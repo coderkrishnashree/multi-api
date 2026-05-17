@@ -9,6 +9,18 @@ let currentBackoffMs = 0;
 
 function stop() { shouldStop = true; }
 
+// MUST match the normalization in src/routes/payments.js exactly.
+// ethers.formatUnits returns strings like "5.0" from the chain parsers, but
+// payments store the canonicalized form ("5"). Without this, the match query
+// `{ amount: "5.0" }` against `{ amount: "5" }` fails, the deposit is never
+// linked to its payment, and no webhook ever fires.
+//
+// TODO: extract to src/utils.js and import in both files so it can't drift.
+function normalizeAmount(s) {
+  if (s === null || s === undefined) return s;
+  return parseFloat(s).toFixed(6).replace(/\.?0+$/, '');
+}
+
 async function tick() {
   await expirePastDuePayments();
 
@@ -87,6 +99,7 @@ async function recordDeposit({ network, user, transfer, currentBlock, requiredCo
   const confirmations = transfer.block_number
     ? Math.max(0, currentBlock - transfer.block_number)
     : 0;
+  const amount = normalizeAmount(transfer.amount); // ← FIX: canonicalize so match query succeeds
   const status = confirmations >= requiredConfirmations ? 'confirmed' : 'pending_confirmation';
 
   try {
@@ -96,7 +109,7 @@ async function recordDeposit({ network, user, transfer, currentBlock, requiredCo
       user_id: user.user_id,
       address: transfer.to,
       from_address: transfer.from,
-      amount: transfer.amount,
+      amount,
       block_number: transfer.block_number,
       confirmations,
       status,
@@ -105,13 +118,13 @@ async function recordDeposit({ network, user, transfer, currentBlock, requiredCo
       confirmed_at: status === 'confirmed' ? new Date() : null,
     });
     logger.info({
-      network, amount: transfer.amount, user_id: user.user_id,
+      network, amount, user_id: user.user_id,
       tx: transfer.tx_hash.slice(0, 10),
     }, 'deposit seen');
 
     await tryMatchDeposit({
       network, user, tx_hash: transfer.tx_hash,
-      amount: transfer.amount, status, confirmations,
+      amount, status, confirmations,
     });
 
     if (status === 'pending_confirmation') {
@@ -158,7 +171,9 @@ async function tryMatchDeposit({ network, user, tx_hash, amount, status, confirm
 }
 
 async function advanceConfirmations(network, currentBlock) {
-  const threshold = network === 'bsc' ? config.bsc.confirmations : config.tron.confirmations;
+  const threshold = network === 'bsc'
+    ? config.bsc.confirmations
+    : config.tron.confirmations;
   const deposits = await collections.deposits
     .find({ network, status: 'pending_confirmation' })
     .toArray();
