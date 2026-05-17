@@ -2,6 +2,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const config = require('./config');
 const { collections } = require('./db');
+const logger = require('./logger');
 
 function signPayload(payload) {
   if (!config.webhookSecret) return null;
@@ -28,7 +29,8 @@ function buildPayload(payment) {
 }
 
 async function deliverWebhook(payment) {
-  const claimed = await collections.payments.findOneAndUpdate(
+  // mongodb driver v6: returns the doc directly (or null on no match)
+  const r = await collections.payments.findOneAndUpdate(
     {
       payment_id: payment.payment_id,
       webhook_status: { $in: ['not_sent', 'sending'] },
@@ -36,7 +38,6 @@ async function deliverWebhook(payment) {
     { $set: { webhook_status: 'sending', updated_at: new Date() } },
     { returnDocument: 'after' }
   );
-  const r = claimed.value || claimed;
   if (!r) return;
 
   const payload = buildPayload(r);
@@ -113,7 +114,7 @@ async function tickWebhooks() {
 
   for (const p of due) {
     await deliverWebhook(p).catch((err) =>
-      logger.error(`webhook tick failed for ${p.payment_id}:`, err.message)
+      logger.error(`webhook tick failed for ${p.payment_id}: ${err.message}`)
     );
   }
 }

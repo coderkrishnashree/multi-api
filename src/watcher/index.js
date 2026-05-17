@@ -35,7 +35,6 @@ async function tick() {
     }),
   ]);
 
-  // If both RPCs are dead, treat the tick as a failure and back off
   if (bscCurrentBlock === null && tronCurrentBlock === null) {
     throw new Error('both RPCs failed');
   }
@@ -59,8 +58,10 @@ async function pollUser(user, blocks) {
 async function pollBsc(user, currentBlock) {
   const { transfers } = await bsc.fetchIncomingTransfers(user.bsc_address, user.bsc_last_block);
   for (const t of transfers) {
-    await recordDeposit({ network: 'bsc', user, transfer: t, currentBlock,
-      requiredConfirmations: config.bsc.confirmations });
+    await recordDeposit({
+      network: 'bsc', user, transfer: t, currentBlock,
+      requiredConfirmations: config.bsc.confirmations,
+    });
   }
   await collections.users.updateOne(
     { user_id: user.user_id },
@@ -71,8 +72,10 @@ async function pollBsc(user, currentBlock) {
 async function pollTron(user, currentBlock) {
   const { transfers } = await tron.fetchIncomingTransfers(user.tron_address, user.tron_last_block);
   for (const t of transfers) {
-    await recordDeposit({ network: 'tron', user, transfer: t, currentBlock,
-      requiredConfirmations: config.tron.confirmations });
+    await recordDeposit({
+      network: 'tron', user, transfer: t, currentBlock,
+      requiredConfirmations: config.tron.confirmations,
+    });
   }
   await collections.users.updateOne(
     { user_id: user.user_id },
@@ -124,7 +127,9 @@ async function recordDeposit({ network, user, transfer, currentBlock, requiredCo
 }
 
 async function tryMatchDeposit({ network, user, tx_hash, amount, status, confirmations }) {
-  const payment = await collections.payments.findOneAndUpdate(
+  // mongodb driver v6: findOneAndUpdate returns the doc directly (or null on no match),
+  // NOT { value: doc, ... } as in v5. Don't read `.value` on the result.
+  const matched = await collections.payments.findOneAndUpdate(
     {
       user_id: user.user_id,
       network,
@@ -138,7 +143,6 @@ async function tryMatchDeposit({ network, user, tx_hash, amount, status, confirm
     { sort: { created_at: 1 }, returnDocument: 'after' }
   );
 
-  const matched = payment.value || payment;
   if (!matched || !matched.payment_id) return;
 
   await collections.deposits.updateOne(
@@ -188,7 +192,8 @@ async function advanceConfirmations(network, currentBlock) {
 }
 
 async function terminalize(paymentId, event) {
-  const result = await collections.payments.findOneAndUpdate(
+  // mongodb driver v6: returns the doc directly (or null), not { value: doc }
+  const p = await collections.payments.findOneAndUpdate(
     { payment_id: paymentId, status: 'pending' },
     {
       $set: {
@@ -200,7 +205,6 @@ async function terminalize(paymentId, event) {
     },
     { returnDocument: 'after' }
   );
-  const p = result.value || result;
   if (!p || !p.payment_id) return;
 
   await collections.users.updateOne(
@@ -222,7 +226,7 @@ async function start() {
   while (!shouldStop) {
     try {
       await tick();
-      currentBackoffMs = 0; // reset on success
+      currentBackoffMs = 0;
     } catch (err) {
       currentBackoffMs = Math.min(
         currentBackoffMs ? currentBackoffMs * 2 : config.watcher.intervalMs,
@@ -231,7 +235,6 @@ async function start() {
       logger.error({ err: err.message, backoffMs: currentBackoffMs }, 'watcher tick error');
     }
     const sleep = currentBackoffMs || config.watcher.intervalMs;
-    // Add ±10% jitter so multiple instances don't sync up against the RPC
     const jittered = sleep * (0.9 + Math.random() * 0.2);
     await new Promise((r) => setTimeout(r, jittered));
   }
